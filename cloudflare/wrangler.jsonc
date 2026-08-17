@@ -1,0 +1,41 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "workspace-mcp",
+	"account_id": "bcdf38c85015fb74b2fb94d196c4ba3b",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-08-14",
+	"containers": [
+		{
+			"class_name": "WorkspaceMcp",
+			"image": "../Dockerfile",
+			"max_instances": 1,
+			"instance_type": "basic"
+		}
+	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "WORKSPACE_MCP",
+				"class_name": "WorkspaceMcp"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["WorkspaceMcp"]
+		}
+	],
+	"routes": [
+		{
+			"pattern": "workspace-mcp.netalico.com",
+			"custom_domain": true
+		}
+	],
+	"triggers": {
+		"crons": ["*/30 * * * *"]
+	},
+	"observability": {
+		"enabled": true
+	}
+}

@@ -15,7 +15,7 @@ COPY . .
 # Install Python dependencies using uv sync
 # --extra otel ships the OpenTelemetry SDK/exporter so tracing can be enabled at
 # runtime via OTEL_* env vars; it stays a no-op unless an OTLP endpoint is set.
-RUN uv sync --frozen --no-dev --extra disk --extra otel
+RUN uv sync --frozen --no-dev --extra disk --extra otel --extra gcs
 
 # Create non-root user for security
 RUN useradd --create-home --shell /bin/bash app \
@@ -44,4 +44,4 @@ ENV TOOLS=""
 
 # Use entrypoint for the base command and CMD for args
 ENTRYPOINT ["/bin/sh", "-c"]
-CMD ["uv run main.py --transport streamable-http ${TOOL_TIER:+--tool-tier \"$TOOL_TIER\"} ${TOOLS:+--tools $TOOLS}"]
+CMD ["if [ -n \"$GCP_SA_KEY_JSON\" ]; then printf '%s' \"$GCP_SA_KEY_JSON\" > /tmp/gcs-sa.json && export GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcs-sa.json; fi; exec uv run main.py --transport streamable-http ${TOOL_TIER:+--tool-tier \"$TOOL_TIER\"} ${TOOLS:+--tools $TOOLS}"]
