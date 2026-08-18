@@ -26,9 +26,12 @@ logger = logging.getLogger(__name__)
 # Google's OAuth 2.0 Authorization Server
 GOOGLE_ISSUER_URL = "https://accounts.google.com"
 
-# Configurable session time in seconds (default: 1 hour, max: 24 hours)
+# Configurable session time in seconds (default: 1 hour, max: 30 days)
+# Netalico fork: max raised from 24h — internal team server, hourly re-auth
+# in claude.ai was too disruptive. Revocation path: rotate the Google client
+# secret (JWT signing key derives from it, invalidating all sessions).
 _DEFAULT_SESSION_TIME = 3600
-_MAX_SESSION_TIME = 86400
+_MAX_SESSION_TIME = 2592000
 
 
 @functools.lru_cache(maxsize=1)

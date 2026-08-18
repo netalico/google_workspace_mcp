@@ -17,6 +17,11 @@ export class WorkspaceMcp extends Container<Env> {
 		this.envVars = {
 			MCP_ENABLE_OAUTH21: "true",
 			WORKSPACE_EXTERNAL_URL: "https://workspace-mcp.netalico.com",
+			// 30-day sessions (fork raises the 24h clamp) — hourly re-auth in
+			// claude.ai was the team's top complaint. Disk-backed OAuth proxy
+			// state survives container restarts (though not redeploys).
+			SESSION_TIME: "2592000",
+			WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND: "disk",
 			PORT: "8000",
 			TOOL_TIER: "core",
 			WORKSPACE_MCP_CREDENTIAL_STORE_BACKEND: "gcs",
