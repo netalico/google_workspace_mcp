@@ -73,6 +73,9 @@ disk = [
 valkey = [
     "py-key-value-aio[valkey]>=0.3.0",
 ]
+firestore = [
+    "py-key-value-aio[firestore]>=0.4.4",
+]
 otel = [
     "opentelemetry-sdk>=1.20.0",
     "opentelemetry-exporter-otlp>=1.20.0",

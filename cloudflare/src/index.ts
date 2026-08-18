@@ -18,10 +18,12 @@ export class WorkspaceMcp extends Container<Env> {
 			MCP_ENABLE_OAUTH21: "true",
 			WORKSPACE_EXTERNAL_URL: "https://workspace-mcp.netalico.com",
 			// 30-day sessions (fork raises the 24h clamp) — hourly re-auth in
-			// claude.ai was the team's top complaint. Disk-backed OAuth proxy
-			// state survives container restarts (though not redeploys).
+			// claude.ai was the team's top complaint. Firestore-backed OAuth
+			// proxy state (Fernet-encrypted) survives restarts AND redeploys;
+			// authenticates with the same SA key as the GCS credential store.
 			SESSION_TIME: "2592000",
-			WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND: "disk",
+			WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND: "firestore",
+			WORKSPACE_MCP_OAUTH_PROXY_FIRESTORE_PROJECT: "netalico-workspace-mcp",
 			PORT: "8000",
 			TOOL_TIER: "core",
 			WORKSPACE_MCP_CREDENTIAL_STORE_BACKEND: "gcs",

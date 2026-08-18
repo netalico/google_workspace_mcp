@@ -484,8 +484,9 @@ def configure_server_for_http():
             )
             valkey_host = os.getenv("WORKSPACE_MCP_OAUTH_PROXY_VALKEY_HOST", "").strip()
 
-            # Determine storage backend: valkey, disk, memory (default)
+            # Determine storage backend: valkey, firestore, disk, memory (default)
             use_valkey = storage_backend == "valkey" or bool(valkey_host)
+            use_firestore = storage_backend == "firestore"
             use_disk = storage_backend == "disk"
 
             if use_valkey:
@@ -625,6 +626,67 @@ def configure_server_for_http():
                 except ValueError as exc:
                     logger.warning(
                         "OAuth 2.1: Invalid Valkey configuration; falling back to default storage (%s).",
+                        exc,
+                    )
+            elif use_firestore:
+                # Netalico fork: Firestore-backed OAuth proxy storage so client
+                # registrations and sessions survive container redeploys.
+                # Authenticates via Application Default Credentials (the same
+                # service-account key the GCS credential store uses). Values are
+                # Fernet-encrypted below, so Firestore only stores ciphertext.
+                try:
+                    from key_value.aio.stores.firestore import FirestoreStore
+
+                    firestore_project = (
+                        os.getenv(
+                            "WORKSPACE_MCP_OAUTH_PROXY_FIRESTORE_PROJECT", ""
+                        ).strip()
+                        or None
+                    )
+                    firestore_database = (
+                        os.getenv(
+                            "WORKSPACE_MCP_OAUTH_PROXY_FIRESTORE_DATABASE", ""
+                        ).strip()
+                        or None
+                    )
+
+                    client_storage = FirestoreStore(
+                        project=firestore_project,
+                        database=firestore_database,
+                        default_collection="oauth-proxy",
+                    )
+
+                    jwt_signing_key = validate_and_derive_jwt_key(
+                        jwt_signing_key_override, config.client_secret
+                    )
+
+                    storage_encryption_key = derive_jwt_key(
+                        high_entropy_material=jwt_signing_key.decode(),
+                        salt="fastmcp-storage-encryption-key",
+                    )
+
+                    client_storage = FernetEncryptionWrapper(
+                        key_value=client_storage,
+                        fernet=Fernet(key=storage_encryption_key),
+                    )
+                    logger.info(
+                        "OAuth 2.1: Using FirestoreStore for FastMCP OAuth proxy client_storage (project=%s, database=%s)",
+                        firestore_project or "(ADC default)",
+                        firestore_database or "(default)",
+                    )
+                    logger.info(
+                        "OAuth 2.1: Applied Fernet encryption wrapper to Firestore client_storage."
+                    )
+                except ImportError as exc:
+                    logger.warning(
+                        "OAuth 2.1: Firestore client_storage requested but Firestore dependencies are not installed (%s). "
+                        "Install 'workspace-mcp[firestore]' (or 'py-key-value-aio[firestore]') "
+                        "or unset WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND.",
+                        exc,
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "OAuth 2.1: Invalid Firestore configuration; falling back to default storage (%s).",
                         exc,
                     )
             elif use_disk:
