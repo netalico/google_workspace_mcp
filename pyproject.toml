@@ -74,7 +74,10 @@ valkey = [
     "py-key-value-aio[valkey]>=0.3.0",
 ]
 firestore = [
-    "py-key-value-aio[firestore]>=0.4.4",
+    # >=0.4.5 for FirestoreV1KeySanitizationStrategy / FirestoreV1CollectionSanitizationStrategy,
+    # which core/server.py needs to keep URL-shaped client IDs (CIMD) out of
+    # Firestore document paths. 0.4.4 ships FirestoreStore without them.
+    "py-key-value-aio[firestore]>=0.4.5",
 ]
 otel = [
     "opentelemetry-sdk>=1.20.0",

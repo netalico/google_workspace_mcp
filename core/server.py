@@ -694,15 +694,23 @@ def configure_server_for_http():
                         "OAuth 2.1: Applied Fernet encryption wrapper to Firestore client_storage."
                     )
                 except ImportError as exc:
-                    logger.warning(
-                        "OAuth 2.1: Firestore client_storage requested but Firestore dependencies are not installed (%s). "
-                        "Install 'workspace-mcp[firestore]' (or 'py-key-value-aio[firestore]') "
-                        "or unset WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND.",
+                    # Logged at error level: the operator explicitly asked for a
+                    # persistent backend, and falling back leaves OAuth state in
+                    # memory, so every redeploy silently signs all clients out.
+                    # An outdated py-key-value-aio also lands here -- the
+                    # sanitization strategies above need >=0.4.5.
+                    logger.error(
+                        "OAuth 2.1: Firestore client_storage requested but unavailable (%s). "
+                        "Falling back to NON-PERSISTENT storage; OAuth clients and sessions "
+                        "will be lost on restart. Install 'workspace-mcp[firestore]' "
+                        "(py-key-value-aio[firestore]>=0.4.5) or unset "
+                        "WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND.",
                         exc,
                     )
                 except ValueError as exc:
-                    logger.warning(
-                        "OAuth 2.1: Invalid Firestore configuration; falling back to default storage (%s).",
+                    logger.error(
+                        "OAuth 2.1: Invalid Firestore configuration; falling back to "
+                        "NON-PERSISTENT storage (%s).",
                         exc,
                     )
             elif use_disk:
