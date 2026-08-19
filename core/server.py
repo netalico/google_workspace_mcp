@@ -641,6 +641,8 @@ def configure_server_for_http():
                         FirestoreV1KeySanitizationStrategy,
                     )
 
+                    from core.storage import MissingOnInvalidKeyWrapper
+
                     firestore_project = (
                         os.getenv(
                             "WORKSPACE_MCP_OAUTH_PROXY_FIRESTORE_PROJECT", ""
@@ -684,6 +686,12 @@ def configure_server_for_http():
                     client_storage = FernetEncryptionWrapper(
                         key_value=client_storage,
                         fernet=Fernet(key=storage_encryption_key),
+                    )
+                    # Outermost so it also catches keys the sanitizer refuses
+                    # outright (the reserved S_/H_ prefixes), which would
+                    # otherwise escape get_client() as a 500 on /authorize.
+                    client_storage = MissingOnInvalidKeyWrapper(
+                        key_value=client_storage
                     )
                     logger.info(
                         "OAuth 2.1: Using FirestoreStore for FastMCP OAuth proxy client_storage (project=%s, database=%s)",
