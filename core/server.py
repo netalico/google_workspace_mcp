@@ -635,7 +635,11 @@ def configure_server_for_http():
                 # service-account key the GCS credential store uses). Values are
                 # Fernet-encrypted below, so Firestore only stores ciphertext.
                 try:
-                    from key_value.aio.stores.firestore import FirestoreStore
+                    from key_value.aio.stores.firestore import (
+                        FirestoreStore,
+                        FirestoreV1CollectionSanitizationStrategy,
+                        FirestoreV1KeySanitizationStrategy,
+                    )
 
                     firestore_project = (
                         os.getenv(
@@ -650,10 +654,22 @@ def configure_server_for_http():
                         or None
                     )
 
+                    # FirestoreStore defaults to a passthrough key strategy, which
+                    # sends keys to the API verbatim. OAuth client IDs are not
+                    # always Firestore-safe document IDs: clients using Client ID
+                    # Metadata Documents (claude.ai does) present a URL as their
+                    # client_id, and the embedded "/" makes Firestore parse it as a
+                    # nested path with an empty segment, which the API rejects with
+                    # InvalidArgument -- surfacing as a 500 on /authorize. Opt into
+                    # Firestore's own ID sanitizers, mirroring the disk backend's
+                    # sanitized FileTreeStore. Keys that are already valid pass
+                    # through unchanged, so existing registrations keep working.
                     client_storage = FirestoreStore(
                         project=firestore_project,
                         database=firestore_database,
                         default_collection="oauth-proxy",
+                        key_sanitization_strategy=FirestoreV1KeySanitizationStrategy(),
+                        collection_sanitization_strategy=FirestoreV1CollectionSanitizationStrategy(),
                     )
 
                     jwt_signing_key = validate_and_derive_jwt_key(
