@@ -24,6 +24,12 @@ export class WorkspaceMcp extends Container<Env> {
 			SESSION_TIME: "2592000",
 			WORKSPACE_MCP_OAUTH_PROXY_STORAGE_BACKEND: "firestore",
 			WORKSPACE_MCP_OAUTH_PROXY_FIRESTORE_PROJECT: "netalico-workspace-mcp",
+			// claude.ai prefers CIMD over DCR whenever the server advertises it,
+			// and that path was never verified working here -- it needs the
+			// container to fetch Anthropic's hosted client metadata document.
+			// Turning it off drops client_id_metadata_document_supported from the
+			// metadata, so Claude falls back to /register (DCR), which is verified.
+			WORKSPACE_MCP_OAUTH_PROXY_ENABLE_CIMD: "false",
 			PORT: "8000",
 			TOOL_TIER: "core",
 			WORKSPACE_MCP_CREDENTIAL_STORE_BACKEND: "gcs",

@@ -811,6 +811,24 @@ def configure_server_for_http():
                         "OAuth 2.1: restricting DCR client redirect URIs to allowlist: %s",
                         allowed_client_redirect_uris,
                     )
+                # CIMD (Client ID Metadata Document) lets a client present a URL
+                # as its client_id instead of registering via DCR. Claude picks it
+                # over DCR whenever the metadata advertises both
+                # client_id_metadata_document_supported and "none" auth, so
+                # advertising it commits every Claude client to a path that
+                # requires this server to fetch the client's metadata document
+                # over the network. Deployments that cannot reach those documents
+                # should turn it off and let clients fall back to the
+                # registration_endpoint. Defaults to enabled, matching upstream.
+                enable_cimd = _parse_bool_env(
+                    os.getenv("WORKSPACE_MCP_OAUTH_PROXY_ENABLE_CIMD", "true")
+                )
+                if not enable_cimd:
+                    logger.info(
+                        "OAuth 2.1: CIMD disabled via "
+                        "WORKSPACE_MCP_OAUTH_PROXY_ENABLE_CIMD; clients will use "
+                        "Dynamic Client Registration instead."
+                    )
                 provider = GoogleProvider(
                     client_id=config.client_id,
                     client_secret=config.client_secret,
@@ -821,6 +839,7 @@ def configure_server_for_http():
                     client_storage=client_storage,
                     jwt_signing_key=jwt_signing_key,
                     allowed_client_redirect_uris=allowed_client_redirect_uris,
+                    enable_cimd=enable_cimd,
                 )
                 if provider.client_registration_options is not None:
                     # Keep protocol-level auth limited to base identity scopes, but
