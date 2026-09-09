@@ -1,0 +1,86 @@
+# Netalico-only. Deploys the Cloudflare Containers app (workspace-mcp.netalico.com)
+# from the `netalico-deploy` branch of the netalico/google_workspace_mcp fork.
+#
+# THIS FILE DOES NOT EXIST UPSTREAM. It is named netalico-deploy.yml rather than
+# deploy.yml so it is obvious in a diff and unlikely to collide when upstream is
+# merged in. The upstream workflows in this directory (pytest, ruff,
+# docker-publish, publish-mcp-registry, check-maintainer-edits) are theirs — do
+# not treat their state as a signal about this deployment.
+#
+# Branch, not main: the deployed code is the 7-commit `netalico-deploy` branch
+# (Cloudflare Containers wrapper, Firestore-backed OAuth proxy storage, 30-day
+# sessions, CIMD off). `main` on this fork tracks upstream and deploys nothing.
+#
+# What a deploy actually does, and why it is slower than the other Netalico
+# workers: this is a Container, not a plain Worker. `wrangler deploy` builds the
+# Python image from the repo-root Dockerfile (uv sync of the full dependency
+# tree), pushes it to Cloudflare's container registry, then updates the Worker.
+# Expect minutes, not seconds.
+#
+# Deploying does NOT change secrets. GOOGLE_OAUTH_CLIENT_ID,
+# GOOGLE_OAUTH_CLIENT_SECRET and GCP_SA_KEY_JSON stay as set on the Worker; the
+# container's own env vars are baked into cloudflare/src/index.ts.
+#
+# Escape hatches:
+#   - Re-run without a commit:  Actions tab -> Netalico deploy -> Run workflow
+#   - Deploy from a laptop:     cd cloudflare && npx wrangler deploy
+#   - Roll back:                npx wrangler rollback <version-id> --name workspace-mcp
+name: Netalico deploy
+
+on:
+  push:
+    branches: [netalico-deploy]
+    # Docs-only pushes don't change the image or the worker. Everything else
+    # can: the container image is built from the repo ROOT, so a change to the
+    # Python app under core/ or auth/ is a real deploy, not just cloudflare/.
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".github/**"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: deploy workspace-mcp
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: cloudflare/package-lock.json
+
+      - name: Install wrangler
+        working-directory: cloudflare
+        run: npm ci
+
+      # There is deliberately no separate gate step before the deploy, which is
+      # unlike every other Netalico repo. Two reasons specific to this one:
+      #
+      #  - `tsc --noEmit` checks nothing here: cloudflare/ has no tsconfig.json,
+      #    so tsc exits 1 and prints its help text.
+      #  - `wrangler deploy --dry-run` is not cheap for a Containers project. It
+      #    still requires Docker and still builds the image, so a dry-run
+      #    followed by a real deploy builds the same Python image twice.
+      #
+      # `wrangler deploy` bundles the Worker and builds the image before it
+      # pushes anything, so a broken wrapper or a broken Dockerfile fails here
+      # without touching production. The Python app itself is covered by
+      # upstream's pytest/ruff workflows.
+
+      # Builds the image from ../Dockerfile, pushes it to Cloudflare's registry,
+      # then deploys. account_id is pinned in wrangler.jsonc, so only the token
+      # is needed. Docker is preinstalled on ubuntu-latest.
+      - name: Deploy
+        working-directory: cloudflare
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
