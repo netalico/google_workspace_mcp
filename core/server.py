@@ -13,6 +13,8 @@ from core.warning_filters import install_startup_warning_filters
 install_startup_warning_filters()
 
 from auth.auth_info_middleware import AuthInfoMiddleware
+from core.camel_case_middleware import CamelCaseArgumentsMiddleware
+from core.portable_schema_middleware import PortableSchemaMiddleware
 from auth.google_auth import handle_auth_callback, start_auth_flow, check_client_secrets
 from auth.gateway_identity import get_verified_gateway_principal
 from auth.mcp_session_middleware import MCPSessionMiddleware
@@ -23,6 +25,7 @@ from auth.oauth_config import (
     get_oauth_config,
     is_trust_gateway_identity,
 )
+from auth.oauth_proxy_config import get_oauth_proxy_expiry_kwargs
 from auth.oauth_responses import (
     create_error_response,
     create_success_response,
@@ -365,6 +368,16 @@ server = SecureFastMCP(
 auth_info_middleware = AuthInfoMiddleware()
 server.add_middleware(auth_info_middleware)
 
+# Accept camelCase argument names (calendarId, timeMin, ...) from callers that
+# mirror the Google API field names, mapping them onto the snake_case tool
+# parameters. See https://github.com/taylorwilsdon/google_workspace_mcp/issues/918
+server.add_middleware(CamelCaseArgumentsMiddleware())
+
+# Advertise tool schemas without null unions or ``const``, which Gemini's
+# function-calling schema cannot represent. See
+# https://github.com/taylorwilsdon/google_workspace_mcp/issues/1099
+server.add_middleware(PortableSchemaMiddleware())
+
 
 def _parse_allowed_redirect_uris(value: Optional[str]) -> Optional[List[str]]:
     """Parse a comma-separated list of OAuth client redirect URIs.
@@ -435,8 +448,10 @@ def configure_server_for_http():
                 "OAuth 2.1 requires GOOGLE_OAUTH_CLIENT_SECRET: Google rejects the "
                 "authorization code exchange without a client secret (invalid_request: "
                 "client_secret is missing), even for public clients using PKCE. Set "
-                "GOOGLE_OAUTH_CLIENT_SECRET, or set EXTERNAL_OAUTH21_PROVIDER=true if "
-                "another identity provider performs the code exchange."
+                "GOOGLE_OAUTH_CLIENT_SECRET (or provide it via a client secrets file "
+                "through GOOGLE_CLIENT_SECRET_PATH), or set "
+                "EXTERNAL_OAUTH21_PROVIDER=true if another identity provider performs "
+                "the code exchange."
             )
 
         def validate_and_derive_jwt_key(
@@ -778,10 +793,16 @@ def configure_server_for_http():
                     jwt_signing_key_override, config.client_secret
                 )
 
+            expiry_kwargs = get_oauth_proxy_expiry_kwargs()
+
             # Check if external OAuth provider is configured
             if config.is_external_oauth21_provider():
                 # External OAuth mode: use custom provider that handles ya29.* access tokens
-                from auth.external_oauth_provider import ExternalOAuthProvider
+                from auth.external_oauth_provider import (
+                    ExternalOAuthProvider,
+                    get_token_validation_workers,
+                    get_token_validation_cache_ttl,
+                )
 
                 provider = ExternalOAuthProvider(
                     client_id=config.client_id,
@@ -791,6 +812,9 @@ def configure_server_for_http():
                     required_scopes=provider_valid_scopes,
                     resource_server_url=config.get_oauth_base_url(),
                     jwt_signing_key=jwt_signing_key,
+                    token_validation_workers=get_token_validation_workers(),
+                    token_validation_cache_ttl=get_token_validation_cache_ttl(),
+                    **expiry_kwargs,
                 )
                 server.auth = provider
 
@@ -840,6 +864,7 @@ def configure_server_for_http():
                     jwt_signing_key=jwt_signing_key,
                     allowed_client_redirect_uris=allowed_client_redirect_uris,
                     enable_cimd=enable_cimd,
+                    **expiry_kwargs,
                 )
                 if provider.client_registration_options is not None:
                     # Keep protocol-level auth limited to base identity scopes, but
@@ -884,6 +909,24 @@ def configure_server_for_http():
 def get_auth_provider() -> Optional[GoogleProvider]:
     """Gets the global authentication provider instance."""
     return _auth_provider
+
+
+def close_auth_provider() -> None:
+    """Release resources owned by the configured authentication provider."""
+    global _auth_provider
+
+    provider = _auth_provider
+    _auth_provider = None
+    set_auth_provider(None)
+    if server.auth is provider:
+        server.auth = None
+
+    close = getattr(provider, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            logger.warning("Failed to close authentication provider", exc_info=True)
 
 
 @server.custom_route("/", methods=["GET"])
