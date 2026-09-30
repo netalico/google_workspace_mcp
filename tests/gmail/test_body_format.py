@@ -1,6 +1,9 @@
 """Tests for Gmail body_format support across helper and public tool APIs."""
 
 import base64
+import inspect
+from email import message_from_bytes
+from email.policy import SMTP
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -13,6 +16,7 @@ from gmail.gmail_tools import (
     _extract_message_bodies,
     _format_body_content,
     _html_to_text,
+    _prepare_gmail_message,
     get_gmail_message_content,
     get_gmail_messages_content_batch,
     get_gmail_thread_content,
@@ -26,6 +30,17 @@ def _unwrap(tool):
     while hasattr(fn, "__wrapped__"):
         fn = fn.__wrapped__
     return fn
+
+
+def test_get_gmail_message_content_preserves_existing_positional_arguments():
+    signature = inspect.signature(_unwrap(get_gmail_message_content))
+    bound = signature.bind(
+        Mock(), "msg-1", "user@example.com", "html", True, "metadata"
+    )
+
+    assert bound.arguments["body_format"] == "html"
+    assert bound.arguments["full"] is True
+    assert bound.arguments["format"] == "metadata"
 
 
 def _encode(text: str) -> str:
@@ -182,6 +197,64 @@ class TestSignatureHtmlToText:
         <div>Engineering</div>"""
 
         assert _signature_html_to_text(signature) == "Acme Corporation\nEngineering"
+
+
+class TestHtmlPlainTextAlternative:
+    """The text/plain alternative of an outgoing HTML message is what non-HTML
+    clients display, so it must keep the author's block structure."""
+
+    @staticmethod
+    def _parts(body: str) -> dict:
+        raw_b64, _, _, _ = _prepare_gmail_message(
+            subject="format test",
+            body=body,
+            to="recipient@example.com",
+            body_format="html",
+        )
+        message = message_from_bytes(base64.urlsafe_b64decode(raw_b64), policy=SMTP)
+        return {
+            part.get_content_type(): part.get_payload(decode=True).decode()
+            for part in message.walk()
+            if part.get_content_maintype() != "multipart"
+        }
+
+    def test_html_part_is_not_escaped(self):
+        body = "<p>First paragraph <strong>bold</strong>.</p><p>Second paragraph.</p>"
+
+        assert self._parts(body)["text/html"].strip() == body
+
+    def test_plain_part_keeps_paragraph_boundaries(self):
+        body = "<p>First paragraph <strong>bold</strong>.</p><p>Second paragraph.</p>"
+
+        plain = self._parts(body)["text/plain"]
+
+        assert plain.split() == ["First", "paragraph", "bold.", "Second", "paragraph."]
+        assert "bold.Second" not in plain
+
+    def test_plain_part_keeps_line_break_tags(self):
+        plain = self._parts("<div>Best,<br>Alice</div>")["text/plain"]
+
+        assert plain.strip().splitlines() == ["Best,", "Alice"]
+
+    def test_plain_part_separates_headings_from_following_text(self):
+        plain = self._parts("<h1>Quarterly update</h1><h2>Revenue</h2>")["text/plain"]
+
+        assert plain.strip().splitlines() == ["Quarterly update", "Revenue"]
+
+    def test_plain_part_separates_semantic_sections(self):
+        body = "<section>Section one.</section><section>Section two.</section>"
+
+        plain = self._parts(body)["text/plain"]
+
+        assert plain.strip().splitlines() == ["Section one.", "Section two."]
+        assert "one.Section" not in plain
+
+    def test_plain_part_keeps_body_ending_in_incomplete_entity(self):
+        # HTMLParser withholds a trailing "&" as a possibly-incomplete entity,
+        # so an unflushed parser drops the whole tail of the body.
+        plain = self._parts("<p>Tom &amp</p>")["text/plain"]
+
+        assert plain.strip() == "Tom &"
 
 
 class TestFormatBodyContentHtmlMode:
@@ -437,6 +510,48 @@ async def test_get_gmail_messages_content_batch_rejects_metadata_with_body_forma
 
 
 @pytest.mark.asyncio
+async def test_get_gmail_message_content_metadata_format_returns_headers_only():
+    """The singular tool accepts the batch tool's format argument (#1152)."""
+    service = _build_service(
+        message_responses={
+            ("msg-1", "metadata"): _metadata_response("msg-1"),
+        }
+    )
+
+    result = await _unwrap(get_gmail_message_content)(
+        service=service,
+        message_id="msg-1",
+        user_google_email="user@example.com",
+        format="metadata",
+    )
+
+    assert "From: sender@example.com" in result
+    assert "--- BODY ---" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("options", "error"),
+    [
+        ({"body_format": "html"}, "require format='full'"),
+        ({"body_format": "raw"}, "require format='full'"),
+        ({"full": True}, "full=True requires format='full'"),
+    ],
+)
+async def test_get_gmail_message_content_rejects_metadata_with_body_options(
+    options, error
+):
+    with pytest.raises(UserInputError, match=error):
+        await _unwrap(get_gmail_message_content)(
+            service=_build_service(),
+            message_id="msg-1",
+            user_google_email="user@example.com",
+            format="metadata",
+            **options,
+        )
+
+
+@pytest.mark.asyncio
 async def test_get_gmail_thread_content_supports_raw_format():
     service = _build_service(
         message_responses={
@@ -580,6 +695,34 @@ async def test_full_export_raw_saves_complete_eml(stdio_storage):
     # The saved file must hold the complete, decoded message.
     with open(_saved_path(result), "rb") as fh:
         assert fh.read().decode() == raw_mime
+
+
+@pytest.mark.asyncio
+async def test_full_export_rejects_size_estimate_before_fetch(monkeypatch):
+    monkeypatch.setenv("WORKSPACE_MCP_MAX_FILE_BYTES", "100")
+    metadata = _metadata_response("msg-large")
+    metadata["sizeEstimate"] = 500
+    service = _build_service(
+        message_responses={
+            ("msg-large", "metadata"): metadata,
+            ("msg-large", "raw"): {"raw": _encode("should not be fetched")},
+        }
+    )
+
+    result = await _unwrap(get_gmail_message_content)(
+        service=service,
+        message_id="msg-large",
+        user_google_email="user@example.com",
+        body_format="raw",
+        full=True,
+    )
+
+    assert result.startswith("Error:")
+    assert "WORKSPACE_MCP_MAX_FILE_BYTES" in result
+    request_formats = [
+        call.kwargs["format"] for call in service.users().messages().get.call_args_list
+    ]
+    assert request_formats == ["metadata"]
 
 
 @pytest.mark.asyncio

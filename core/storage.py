@@ -55,7 +55,9 @@ class MissingOnInvalidKeyWrapper(BaseWrapper):
     def __init__(self, key_value: Any) -> None:
         self.key_value = key_value
 
-    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+    async def get(
+        self, key: str, *, collection: str | None = None
+    ) -> dict[str, Any] | None:
         try:
             return await self.key_value.get(collection=collection, key=key)
         except InvalidKeyError:
@@ -93,7 +95,9 @@ class MissingOnInvalidKeyWrapper(BaseWrapper):
         except InvalidKeyError:
             return False
 
-    async def delete_many(self, keys: Sequence[str], *, collection: str | None = None) -> int:
+    async def delete_many(
+        self, keys: Sequence[str], *, collection: str | None = None
+    ) -> int:
         try:
             return await self.key_value.delete_many(keys=keys, collection=collection)
         except InvalidKeyError:
