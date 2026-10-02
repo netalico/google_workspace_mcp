@@ -84,3 +84,40 @@ jobs:
         run: npx wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # Post-deploy smoke check (Nico Wishlist 1218965365921378). A green
+      # `wrangler deploy` only proves the upload landed: a module-evaluation
+      # error, a broken image or a missing secret still ships a 500
+      # (harvest-asana-v2, 2026-09-11). This hits production and fails the job
+      # on any status other than the expected one. It does NOT roll back: on
+      # red, roll back by hand (escape hatches at the top of this file). The
+      # same step lives in every Netalico auto-deploy repo; only the smoke lines
+      # differ. Unlike the plain Workers, this one waits up to ~5 minutes per
+      # URL (SMOKE_TRIES=30): a fresh container is a cold Python boot on 0.25
+      # vCPU and can return 5xx while the new instance comes up.
+      - name: Smoke check production
+        shell: bash
+        env:
+          SMOKE_TRIES: "30"
+        run: |
+          # smoke <url> <allowed status regex>. Retries while the new version
+          # propagates. No -L: a redirect is itself the answer.
+          smoke() {
+            local code=000
+            for i in $(seq 1 "${SMOKE_TRIES:-6}"); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$1" || true)
+              if [[ "$code" =~ ^($2)$ ]]; then echo "ok   $1 -> $code"; return 0; fi
+              echo "try $i: $1 -> $code (want $2)"
+              sleep 10
+            done
+            echo "::error::Smoke check failed: $1 returned $code, expected $2"
+            return 1
+          }
+          sleep 10
+          # /health is public and answered by the Python app inside the
+          # container, so a 200 proves the image booted, not just the Worker.
+          smoke https://workspace-mcp.netalico.com/health '200'
+          # OAuth metadata is public; it needs the OAuth proxy initialised.
+          smoke https://workspace-mcp.netalico.com/.well-known/oauth-authorization-server '200'
+          # /mcp without a token must be refused, never a 5xx.
+          smoke https://workspace-mcp.netalico.com/mcp '401'
