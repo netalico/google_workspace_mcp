@@ -1,0 +1,173 @@
+# Netalico-only. Weekly check that `netalico-deploy` has not drifted too far
+# behind upstream (taylorwilsdon/google_workspace_mcp). Nico Wishlist
+# 1218965285781141: the fork once sat 435 commits and six minor releases behind
+# upstream, missing auth fixes, because nothing ever looked.
+#
+# THIS FILE DOES NOT EXIST UPSTREAM (netalico- prefix, like netalico-deploy.yml).
+#
+# Read-only with respect to code: it never pushes, merges or deploys. Its only
+# write is one tracking issue in this repo, titled with the marker below:
+#   - more than one minor release behind  -> open the issue, or refresh its body
+#   - back within one minor release        -> close it with a comment
+# "Minor release" counts distinct major.minor versions, so patch releases never
+# trigger it: on v1.30.x with upstream at v2.0.0 is one behind (quiet); upstream
+# shipping v2.1.0 makes it two (issue opens).
+#
+# Two repo settings this needs (see the PR that added it):
+#   - Scheduled workflows only run from the DEFAULT branch. Until the default
+#     branch is `netalico-deploy` (it is `main` on this fork), only the manual
+#     "Run workflow" button fires it.
+#   - Issues must be enabled on the fork. If they are off, the job fails red
+#     instead, so the drift still surfaces as a failed run.
+name: Netalico upstream drift
+
+on:
+  schedule:
+    - cron: "17 13 * * 1" # Mondays 13:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-drift
+  cancel-in-progress: true
+
+env:
+  UPSTREAM: taylorwilsdon/google_workspace_mcp
+  DEPLOY_BRANCH: netalico-deploy
+  # Alert when the fork is MORE than this many minor releases behind.
+  MAX_MINOR_BEHIND: "1"
+  ISSUE_MARKER: "[upstream-drift]"
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.DEPLOY_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Measure drift against upstream release tags
+        id: measure
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet --no-tags "https://github.com/${UPSTREAM}.git" \
+            "+refs/tags/v*:refs/tags/upstream/v*" "+refs/heads/main:refs/remotes/upstream/main"
+
+          # Upstream release tags, plain vX.Y.Z only, highest first.
+          # (Tag names have no whitespace, so word-splitting into an array is safe.)
+          tags=($(git tag -l 'upstream/v*' | sed 's#^upstream/##' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -rV))
+          [ "${#tags[@]}" -gt 0 ] || { echo "::error::No upstream release tags found"; exit 1; }
+          latest="${tags[0]}"
+
+          # The fork's base release: the highest upstream tag already merged in.
+          base=""
+          for t in "${tags[@]}"; do
+            if git merge-base --is-ancestor "upstream/$t" HEAD; then base="$t"; break; fi
+          done
+          [ -n "$base" ] || { echo "::error::No upstream release tag is an ancestor of ${DEPLOY_BRANCH}"; exit 1; }
+
+          minor() { echo "$1" | sed -E 's/^v([0-9]+)\.([0-9]+)\..*/\1.\2/'; }
+          base_minor=$(minor "$base")
+          # Distinct major.minor lines released upstream that are newer than ours.
+          minors_behind=$(printf '%s\n' "${tags[@]}" | while read -r t; do minor "$t"; done \
+            | sort -uV | awk -v b="$base_minor" '
+                function gt(x, y,  a, c) { split(x, a, "."); split(y, c, ".");
+                  return (a[1]+0 > c[1]+0) || (a[1]+0 == c[1]+0 && a[2]+0 > c[2]+0) }
+                gt($0, b) { n++ } END { print n+0 }')
+          # Releases newer than the base that are not merged in yet.
+          newer=$(printf '%s\n' "${tags[@]}" | while read -r t; do
+            [ "$t" = "$base" ] && break
+            git merge-base --is-ancestor "upstream/$t" HEAD || echo "$t"; done | sort -V | tr '\n' ' ')
+          commits_behind=$(git rev-list --count "HEAD..upstream/$latest")
+          main_behind=$(git rev-list --count HEAD..upstream/main)
+          netalico_only=$(git log --oneline --no-merges "upstream/$latest..HEAD" | wc -l | tr -d ' ')
+
+          {
+            echo "latest=$latest"
+            echo "base=$base"
+            echo "minors_behind=$minors_behind"
+            echo "commits_behind=$commits_behind"
+            echo "main_behind=$main_behind"
+            echo "netalico_only=$netalico_only"
+            echo "newer=$newer"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Upstream drift"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| \`${DEPLOY_BRANCH}\` is based on | \`$base\` |"
+            echo "| Latest upstream release | \`$latest\` |"
+            echo "| Minor releases behind | $minors_behind (alert above $MAX_MINOR_BEHIND) |"
+            echo "| Commits behind \`$latest\` | $commits_behind |"
+            echo "| Commits behind upstream main | $main_behind |"
+            echo "| Netalico-only commits | $netalico_only |"
+            echo "| Unmerged releases | ${newer:-none} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat "$GITHUB_STEP_SUMMARY"
+
+      - name: Open, refresh or close the tracking issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          LATEST: ${{ steps.measure.outputs.latest }}
+          BASE: ${{ steps.measure.outputs.base }}
+          MINORS_BEHIND: ${{ steps.measure.outputs.minors_behind }}
+          COMMITS_BEHIND: ${{ steps.measure.outputs.commits_behind }}
+          NETALICO_ONLY: ${{ steps.measure.outputs.netalico_only }}
+          NEWER: ${{ steps.measure.outputs.newer }}
+        run: |
+          set -euo pipefail
+          title="${ISSUE_MARKER} ${DEPLOY_BRANCH} is ${MINORS_BEHIND} minor releases behind upstream ${LATEST}"
+          over=$(( MINORS_BEHIND > MAX_MINOR_BEHIND ? 1 : 0 ))
+
+          if [ "$(gh api "repos/$REPO" --jq .has_issues)" != "true" ]; then
+            if [ "$over" = 1 ]; then
+              echo "::error::$title. Issues are disabled on $REPO, so this failed run is the alert."
+              exit 1
+            fi
+            echo "Within threshold; issues are disabled so there is nothing to close."
+            exit 0
+          fi
+
+          existing=$(gh issue list -R "$REPO" --state open --search "\"${ISSUE_MARKER}\" in:title" \
+            --json number --jq '.[0].number // empty')
+
+          if [ "$over" = 0 ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" -R "$REPO" \
+                --comment "Back within ${MAX_MINOR_BEHIND} minor release of upstream: ${DEPLOY_BRANCH} is on ${BASE}, latest is ${LATEST}. Closed by ${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}."
+            fi
+            echo "Within threshold."
+            exit 0
+          fi
+
+          body=$(cat <<EOF
+          \`${DEPLOY_BRANCH}\` (what deploys workspace-mcp.netalico.com) is based on upstream **${BASE}**. Upstream's latest release is **${LATEST}**.
+
+          - Minor releases behind: **${MINORS_BEHIND}** (alert threshold: more than ${MAX_MINOR_BEHIND})
+          - Commits behind ${LATEST}: ${COMMITS_BEHIND}
+          - Netalico-only commits to carry: ${NETALICO_ONLY}
+          - Unmerged releases: ${NEWER}
+
+          To catch up, branch from \`${DEPLOY_BRANCH}\`, \`git merge --no-ff ${LATEST}\` from upstream, resolve conflicts (usually \`Dockerfile\` and \`uv.lock\`), run \`uv run pytest\`, and open a PR to \`${DEPLOY_BRANCH}\`. Merging that PR deploys. Upstream release notes: https://github.com/${UPSTREAM}/releases
+
+          Updated by ${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}. This issue closes itself once the fork is back within threshold.
+          EOF
+          )
+
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" -R "$REPO" --title "$title" --body "$body"
+            echo "Refreshed issue #$existing"
+          else
+            gh issue create -R "$REPO" --title "$title" --body "$body"
+          fi

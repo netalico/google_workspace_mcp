@@ -1,0 +1,79 @@
+# Netalico-only. Builds the production container image on every PR into
+# `netalico-deploy` and boots it, so a broken Dockerfile, lock file or startup
+# path shows up on the PR instead of during the deploy that merging triggers.
+#
+# THIS FILE DOES NOT EXIST UPSTREAM (netalico- prefix, like netalico-deploy.yml).
+# Upstream's docker-publish.yml only runs for PRs into `main`.
+#
+# No secrets, no environment, no push: the image is built locally on the
+# runner and thrown away. It boots with dummy Google OAuth values and the
+# default in-memory OAuth proxy storage (the Firestore backend needs the real
+# service-account key, which a PR job must never see), then gets the same three
+# checks as the post-deploy smoke step in netalico-deploy.yml.
+name: Netalico PR image check
+
+on:
+  pull_request:
+    branches: [netalico-deploy]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-image-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Build image (same Dockerfile wrangler deploys)
+        run: docker build -t workspace-mcp:pr .
+
+      - name: Boot and smoke-check
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Same container env as cloudflare/src/index.ts, minus secrets and
+          # the Firestore/GCS backends.
+          docker run -d --name wsmcp -p 8000:8000 \
+            -e MCP_ENABLE_OAUTH21=true \
+            -e WORKSPACE_EXTERNAL_URL=http://localhost:8000 \
+            -e SESSION_TIME=2592000 \
+            -e WORKSPACE_MCP_OAUTH_PROXY_ENABLE_CIMD=false \
+            -e PORT=8000 \
+            -e TOOL_TIER=core \
+            -e WORKSPACE_MCP_BRAND_NAME="Netalico Workspace MCP" \
+            -e GOOGLE_OAUTH_CLIENT_ID=ci-dummy.apps.googleusercontent.com \
+            -e GOOGLE_OAUTH_CLIENT_SECRET=ci-dummy-secret \
+            workspace-mcp:pr
+
+          smoke() {
+            local code=000
+            for i in $(seq 1 30); do
+              code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "http://localhost:8000$1" || true)
+              if [[ "$code" =~ ^($2)$ ]]; then echo "ok   $1 -> $code"; return 0; fi
+              sleep 2
+            done
+            echo "::error::$1 returned $code, expected $2"
+            return 1
+          }
+          rc=0
+          smoke /health '200' || rc=1
+          smoke /.well-known/oauth-authorization-server '200' || rc=1
+          smoke /mcp '401' || rc=1
+          # CIMD is off in production; the metadata must not advertise it.
+          if curl -s http://localhost:8000/.well-known/oauth-authorization-server \
+              | grep -q '"client_id_metadata_document_supported": *true'; then
+            echo "::error::CIMD advertised despite WORKSPACE_MCP_OAUTH_PROXY_ENABLE_CIMD=false"
+            rc=1
+          fi
+          echo "--- container log (tail)"
+          docker logs wsmcp 2>&1 | tail -40
+          docker rm -f wsmcp >/dev/null
+          exit $rc
