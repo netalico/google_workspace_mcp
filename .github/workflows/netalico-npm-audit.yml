@@ -1,0 +1,87 @@
+# Weekly runtime-dependency audit. Nico Wishlist 1218965441877490.
+#
+# READ-ONLY: no install, no build, no deploy, no writes. It runs
+# `npm audit --omit=dev --audit-level=high` against the committed lockfile and
+# fails (a red run in the Actions tab, plus GitHub's failed-workflow email to
+# whoever last touched the cron) when a high or critical advisory appears in a
+# runtime dependency that is not on the AUDIT_ALLOW list below.
+#
+# This is the backstop until Dependabot alerts are on for the org; it keeps
+# working after that too. Dev-only advisories are out of scope on purpose
+# (wrangler, vitest, tsc never ship in the Worker bundle).
+#
+# Scheduled workflows only run from the default branch. Run it by hand with
+# Actions -> npm audit (weekly) -> Run workflow.
+name: npm audit (weekly)
+
+on:
+  schedule:
+    - cron: "23 13 * * 1" # Mondays 13:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-audit
+  cancel-in-progress: true
+
+env:
+  # Accepted high/critical advisories (none today). Add "GHSA-xxxx-xxxx-xxxx: reason"
+  # lines here only when no non-breaking fix exists; anything not listed fails.
+  AUDIT_ALLOW: ""
+
+jobs:
+  audit:
+    name: audit ${{ matrix.dir }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: ["cloudflare"]
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      # npm audit reads package-lock.json directly; no `npm ci` needed, so no
+      # install scripts run here.
+      - name: npm audit (runtime deps, high+)
+        shell: bash
+        run: |
+          set -uo pipefail
+          npm audit --omit=dev --audit-level=high || true   # human-readable report
+          npm audit --omit=dev --json > "$RUNNER_TEMP/audit.json" || true
+          node - "$RUNNER_TEMP/audit.json" <<'EOF'
+          const fs = require("fs");
+          const report = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+          if (report.error) { console.error("npm audit failed:", JSON.stringify(report.error)); process.exit(2); }
+          const allow = new Set((process.env.AUDIT_ALLOW || "").split("\n")
+            .map((l) => l.split(":")[0].trim()).filter(Boolean));
+          const seen = new Map();
+          for (const v of Object.values(report.vulnerabilities || {})) {
+            for (const via of v.via) {
+              if (typeof via !== "object") continue;
+              if (via.severity !== "high" && via.severity !== "critical") continue;
+              const id = (via.url || "").split("/").pop();
+              if (!seen.has(id)) seen.set(id, `${via.severity} ${via.name}: ${via.title} (${via.url})`);
+            }
+          }
+          const fresh = [...seen].filter(([id]) => !allow.has(id));
+          const accepted = [...seen].filter(([id]) => allow.has(id));
+          for (const [, line] of accepted) console.log("accepted  " + line);
+          for (const [, line] of fresh) console.log("NEW       " + line);
+          if (fresh.length) {
+            console.log(`::error::${fresh.length} high/critical runtime advisory(ies) not on AUDIT_ALLOW. Try \`npm audit fix\` (no --force).`);
+            process.exit(1);
+          }
+          console.log(`OK: no unaccepted high/critical runtime advisories (${accepted.length} accepted).`);
+          EOF
