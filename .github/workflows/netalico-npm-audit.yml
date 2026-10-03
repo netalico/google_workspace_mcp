@@ -1,3 +1,11 @@
+# Netalico-only. THIS FILE DOES NOT EXIST UPSTREAM (netalico- prefix, like
+# netalico-deploy.yml). It lives on BOTH `main` (the fork's default branch, the
+# only place a schedule fires from) and `netalico-deploy`, and always audits the
+# deployed `netalico-deploy` branch's cloudflare/ lockfile.
+#
+# Scope: the npm side only (the Cloudflare Containers wrapper). The Python app's
+# dependencies (uv.lock) are NOT covered by this job.
+#
 # Weekly runtime-dependency audit. Nico Wishlist 1218965441877490.
 #
 # READ-ONLY: no install, no build, no deploy, no writes. It runs
@@ -46,6 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: netalico-deploy
           persist-credentials: false
 
       - uses: actions/setup-node@v5
